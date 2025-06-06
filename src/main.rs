@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use axum::http::Method;
+use tower_http::cors::{Any, CorsLayer};
 #[derive(Debug, Deserialize, Serialize)]
 enum Direction {
     Up,
@@ -72,6 +74,12 @@ async fn main() {
         }
     });
 
+    // Set up CORS
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any);
+
     let app = Router::new()
         .route(
             "/api/sven/command",
@@ -80,7 +88,8 @@ async fn main() {
                 move |body| handle_command(body, Extension(shared_state))
             }),
         )
-        .layer(Extension(app_state));
+        .layer(Extension(app_state))
+        .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
