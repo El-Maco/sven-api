@@ -1,4 +1,6 @@
-use axum::{Json, Router, extract::Extension, routing::post};
+use axum::{
+    Json, Router, extract::Extension, http::StatusCode, response::IntoResponse, routing::post,
+};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -35,7 +37,7 @@ struct AppState {
 async fn handle_command(
     Json(command): Json<Command>,
     state: Extension<Arc<AppState>>,
-) -> &'static str {
+) -> impl IntoResponse {
     println!(
         "Moving Sven {} for {} ms",
         command.direction, command.duration
@@ -53,7 +55,10 @@ async fn handle_command(
         .publish(topic, QoS::AtLeastOnce, false, payload)
         .await;
 
-    "Command received"
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "Command sent successfully"})),
+    )
 }
 
 #[tokio::main]
