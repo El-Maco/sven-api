@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router, extract::Extension, http::StatusCode, response::IntoResponse, routing::post,
+    extract::Extension, http::StatusCode, response::IntoResponse, routing::post, Json, Router,
 };
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
@@ -23,10 +23,33 @@ impl std::fmt::Display for Direction {
     }
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub enum SvenCommand {
+    UpDuration,     // value: ms
+    DownDuration,   // value: ms
+    UpRelative,     // value: mm
+    DownRelative,   // value: mm
+    AbsoluteHeight, // value: mm
+    Position,       // value: SvenPosition
+}
+
+// Just for printing purposes
+impl std::fmt::Display for SvenCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SvenCommand::UpDuration => write!(f, "Up Duration"),
+            SvenCommand::DownDuration => write!(f, "Down Duration"),
+            SvenCommand::UpRelative => write!(f, "Up Relative"),
+            SvenCommand::DownRelative => write!(f, "Down Relative"),
+            SvenCommand::AbsoluteHeight => write!(f, "Absolute Height"),
+            SvenCommand::Position => write!(f, "Position"),
+        }
+    }
+}
 #[derive(Debug, Deserialize, Serialize)]
-struct Command {
-    direction: Direction,
-    duration: u32,
+pub struct DeskCommand {
+    pub command: SvenCommand,
+    pub value: u32,
 }
 
 // Shared state for MQTT client
@@ -35,13 +58,10 @@ struct AppState {
 }
 
 async fn handle_command(
-    Json(command): Json<Command>,
+    Json(command): Json<DeskCommand>,
     state: Extension<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!(
-        "Moving Sven {} for {} ms",
-        command.direction, command.duration
-    );
+    println!("Moving Sven {} for {} ms", command.command, command.value);
 
     // Serialize the command as JSON for MQTT payload
     let payload = serde_json::to_string(&command).unwrap();
@@ -90,7 +110,10 @@ async fn main() {
             "/api/sven/command",
             post({
                 let shared_state = app_state.clone();
-                move |body| handle_command(body, Extension(shared_state))
+                move |body| {
+                    println!("Received command: {:?}", body);
+                    handle_command(body, Extension(shared_state))
+                }
             }),
         )
         .layer(Extension(app_state))
