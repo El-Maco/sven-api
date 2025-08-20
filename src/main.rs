@@ -66,7 +66,10 @@ async fn handle_command(
     Json(command): Json<DeskCommand>,
     state: Extension<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("Moving Sven {} for {} ms", command.command, command.value);
+    println!(
+        "Received command {} with value {}",
+        command.command, command.value
+    );
 
     // Serialize the command as JSON for MQTT payload
     let payload = serde_json::to_string(&command).unwrap();
@@ -140,7 +143,8 @@ async fn main() {
                     match publish.topic.as_str() {
                         "sven/state" => {
                             // Deserialize the payload into SvenState
-                            if let Ok(state) = serde_json::from_slice::<SvenState>(&publish.payload) {
+                            if let Ok(state) = serde_json::from_slice::<SvenState>(&publish.payload)
+                            {
                                 let mut sven_state = mqtt_app_state.sven_state.lock().await;
                                 *sven_state = state;
                                 println!("Updated Sven state: {:?}", *sven_state);
