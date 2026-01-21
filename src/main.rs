@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::Extension,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
@@ -12,20 +12,11 @@ use tokio::sync::Mutex;
 
 use axum::http::Method;
 use tower_http::cors::{Any, CorsLayer};
-#[derive(Debug, Deserialize, Serialize)]
-enum Direction {
-    Up,
-    Down,
-}
 
-impl std::fmt::Display for Direction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Direction::Up => write!(f, "Up"),
-            Direction::Down => write!(f, "Down"),
-        }
-    }
-}
+pub const SVEN_COMMAND_TOPIC: &str = "sven/command";
+pub const SVEN_STATE_TOPIC: &str = "sven/state";
+pub const SVEN_STATUS_TOPIC: &str = "sven/status";
+
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum SvenCommand {
@@ -60,6 +51,7 @@ pub struct DeskCommand {
 struct AppState {
     mqtt_client: Arc<Mutex<AsyncClient>>,
     sven_state: Arc<Mutex<SvenState>>,
+    sven_status: Arc<Mutex<String>>,
 }
 
 async fn handle_command(
@@ -76,11 +68,10 @@ async fn handle_command(
 
     // Publish to MQTT broker
     let client = state.mqtt_client.clone();
-    let topic = "sven/command";
     let _ = client
         .lock()
         .await
-        .publish(topic, QoS::AtLeastOnce, false, payload)
+        .publish(SVEN_COMMAND_TOPIC, QoS::AtLeastOnce, false, payload)
         .await;
 
     (
@@ -110,15 +101,21 @@ async fn get_sven_state(Extension(app_state): Extension<Arc<AppState>>) -> impl 
     (StatusCode::OK, Json(*sven_state))
 }
 
+async fn get_sven_status(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let sven_status = app_state.sven_status.lock().await;
+    println!("Returning Sven status: {}", *sven_status);
+    (StatusCode::OK, Json(sven_status.clone()))
+}
+
 #[tokio::main]
 async fn main() {
     // MQTT client setup
-    let mut mqttoptions = MqttOptions::new("sven-client", "localhost", 1883);
-    mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
+    let mut mqtt_options = MqttOptions::new("sven-client", "localhost", 1883);
+    mqtt_options.set_keep_alive(std::time::Duration::from_secs(5));
 
-    let (mqtt_client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    let (mqtt_client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
     mqtt_client
-        .subscribe("sven/state", QoS::AtLeastOnce)
+        .subscribe("sven/#", QoS::AtLeastOnce)
         .await
         .unwrap();
     let app_state = Arc::new(AppState {
@@ -127,6 +124,7 @@ async fn main() {
             height_mm: 0,
             position: SvenPosition::Custom,
         })),
+        sven_status: Arc::new(Mutex::new("offline".to_string())),
     });
 
     let mqtt_app_state = app_state.clone();
@@ -151,10 +149,19 @@ async fn main() {
                             } else {
                                 eprintln!("Failed to deserialize Sven state");
                             }
+                        },
+                        SVEN_STATUS_TOPIC => {
+                            if let Ok(status) =
+                                String::from_utf8(publish.payload.to_vec())
+                            {
+                                let mut sven_status = mqtt_app_state.sven_status.lock().await;
+                                *sven_status = status;
+                                println!("Updated Sven status: {}", *sven_status);
+                            } else {
+                                eprintln!("Failed to deserialize Sven status");
+                            }
                         }
-                        _ => {
-                            eprintln!("Unknown topic: {}", publish.topic);
-                        }
+                        _ => eprintln!("Unknown topic: {}", publish.topic),
                     }
                 }
                 Ok(_) => {}
@@ -173,7 +180,7 @@ async fn main() {
 
     let app = Router::new()
         .route(
-            "/api/sven/command",
+            format!("/api/{}", SVEN_COMMAND_TOPIC).as_str(),
             post({
                 let shared_state = app_state.clone();
                 move |body| {
@@ -182,7 +189,14 @@ async fn main() {
                 }
             }),
         )
-        .route("/api/sven/state", get(get_sven_state))
+        .route(
+            format!("/api/{}", SVEN_STATE_TOPIC).as_str(),
+            get(get_sven_state),
+        )
+        .route(
+            format!("/api/{}", SVEN_STATUS_TOPIC).as_str(),
+            get(get_sven_status),
+        )
         .layer(Extension(app_state))
         .layer(cors);
 
