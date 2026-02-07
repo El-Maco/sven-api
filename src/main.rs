@@ -9,6 +9,7 @@ use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use chrono::{self, Timelike};
 
 use axum::http::Method;
 use tower_http::cors::{Any, CorsLayer};
@@ -106,11 +107,30 @@ async fn get_sven_status(Extension(app_state): Extension<Arc<AppState>>) -> impl
     println!("Returning Sven status: {}", *sven_status);
     (StatusCode::OK, Json(sven_status.clone()))
 }
+async fn set_to_night_mode(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let client = app_state.mqtt_client.clone();
+    let _ = client
+        .lock()
+        .await
+        .publish(
+            SVEN_COMMAND_TOPIC,
+            QoS::AtLeastOnce,
+            false,
+            serde_json::to_string(&DeskCommand {
+                command: SvenCommand::AbsoluteHeight,
+                value: 795,
+            })
+            .unwrap(),
+        )
+        .await;
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "Night mode activated"})))
+}
 
 #[tokio::main]
 async fn main() {
     // MQTT client setup
-    let mut mqtt_options = MqttOptions::new("sven-client", "localhost", 1883);
+    let mut mqtt_options = MqttOptions::new("sven-client", "minimaco", 1883);
     mqtt_options.set_keep_alive(std::time::Duration::from_secs(5));
 
     let (mqtt_client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
@@ -167,6 +187,19 @@ async fn main() {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("MQTT error: {:?}", e);
+                }
+            }
+
+            // if time is after 23:00 and we are not above armrest, set to night mode
+            let now = chrono::Local::now();
+            if now.hour() >= 23 || now.hour() < 6 {
+                let sven_state = mqtt_app_state.sven_state.lock().await;
+                if sven_state.height_mm < 795 && sven_state.height_mm > 0 {
+                    println!("Sven is not Above Armrest ({:?} mm < 795), activating night mode", sven_state.height_mm);
+                    drop(sven_state);
+                    set_to_night_mode(Extension(mqtt_app_state.clone())).await;
+                    // wait a bit before checking again to avoid spamming commands
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await
                 }
             }
         }
