@@ -5,11 +5,11 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use rumqttc::{AsyncClient, MqttOptions, QoS};
+use chrono::{self, Timelike};
+use rumqttc::{AsyncClient, Event as MqttEvent, MqttOptions, Outgoing, Packet, QoS};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use chrono::{self, Timelike};
 
 use axum::http::Method;
 use tower_http::cors::{Any, CorsLayer};
@@ -17,7 +17,6 @@ use tower_http::cors::{Any, CorsLayer};
 pub const SVEN_COMMAND_TOPIC: &str = "sven/command";
 pub const SVEN_STATE_TOPIC: &str = "sven/state";
 pub const SVEN_STATUS_TOPIC: &str = "sven/status";
-
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum SvenCommand {
@@ -107,7 +106,7 @@ async fn get_sven_status(Extension(app_state): Extension<Arc<AppState>>) -> impl
     println!("Returning Sven status: {}", *sven_status);
     (StatusCode::OK, Json(sven_status.clone()))
 }
-async fn set_to_night_mode(Extension(app_state): Extension<Arc<AppState>>) -> impl IntoResponse {
+async fn set_to_night_mode(Extension(app_state): Extension<Arc<AppState>>) {
     let client = app_state.mqtt_client.clone();
     let _ = client
         .lock()
@@ -118,19 +117,35 @@ async fn set_to_night_mode(Extension(app_state): Extension<Arc<AppState>>) -> im
             false,
             serde_json::to_string(&DeskCommand {
                 command: SvenCommand::AbsoluteHeight,
-                value: 795,
+                value: 850,
             })
             .unwrap(),
         )
         .await;
+}
 
-    (StatusCode::OK, Json(serde_json::json!({"status": "Night mode activated"})))
+static HOST_IP: &str = "192.168.1.132";
+
+async fn host_is_active() -> bool {
+    match tokio::process::Command::new("ping")
+        .arg("-c")
+        .arg("1")
+        .arg(HOST_IP)
+        .output()
+        .await
+    {
+        Ok(output) => output.status.success(),
+        Err(e) => {
+            eprintln!("Failed to execute ping command: {:?}", e);
+            false
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
     // MQTT client setup
-    let mut mqtt_options = MqttOptions::new("sven-client", "minimaco", 1883);
+    let mut mqtt_options = MqttOptions::new("sven-client", "localhost", 1883);
     mqtt_options.set_keep_alive(std::time::Duration::from_secs(5));
 
     let (mqtt_client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
@@ -148,12 +163,68 @@ async fn main() {
     });
 
     let mqtt_app_state = app_state.clone();
+    let night_mode_app_state = app_state.clone();
+    let _ = tokio::spawn(async move {
+        loop {
+            let sven_state = {
+                let sven_state = night_mode_app_state.sven_state.lock().await;
+                *sven_state
+            };
+            static NIGHT_TIME_THRESHOLD_MM: u32 = 845;
 
+            if sven_state.height_mm >= NIGHT_TIME_THRESHOLD_MM {
+                println!(
+                    "Current height is {}... Already in night mode!",
+                    sven_state.height_mm
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+
+            static NIGHT_TIME_START: u32 = 23;
+            static NIGHT_TIME_END: u32 = 6;
+
+            let now = chrono::Local::now();
+            if now.hour() < NIGHT_TIME_START && now.hour() >= NIGHT_TIME_END {
+                println!("Not night time, skipping night mode check");
+                let wait_time = now
+                    .with_hour(NIGHT_TIME_START)
+                    .unwrap()
+                    .with_minute(0)
+                    .unwrap()
+                    .with_second(0)
+                    .unwrap()
+                    - now;
+                println!(
+                    "Waiting until night time starts in {} seconds",
+                    wait_time.num_seconds()
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    wait_time.num_seconds() as u64
+                ))
+                .await;
+                continue;
+            }
+
+            if host_is_active().await {
+                println!("Host is still active, will not set to night mode");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+
+            println!(
+                "It's night time and current height is {}, setting desk to night mode",
+                sven_state.height_mm
+            );
+            set_to_night_mode(Extension(night_mode_app_state.clone())).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
     // Spawn a task to poll the MQTT event loop
     let eventloop_handle = tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
-                Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
+                Ok(MqttEvent::Incoming(Packet::Publish(publish))) => {
                     println!(
                         "Received MQTT packet: {}: {:?}",
                         publish.topic, publish.payload
@@ -169,11 +240,9 @@ async fn main() {
                             } else {
                                 eprintln!("Failed to deserialize Sven state");
                             }
-                        },
+                        }
                         SVEN_STATUS_TOPIC => {
-                            if let Ok(status) =
-                                String::from_utf8(publish.payload.to_vec())
-                            {
+                            if let Ok(status) = String::from_utf8(publish.payload.to_vec()) {
                                 let mut sven_status = mqtt_app_state.sven_status.lock().await;
                                 *sven_status = status;
                                 println!("Updated Sven status: {}", *sven_status);
@@ -184,22 +253,13 @@ async fn main() {
                         _ => eprintln!("Unknown topic: {}", publish.topic),
                     }
                 }
+                Ok(MqttEvent::Outgoing(Outgoing::Publish(publish))) => {
+                    println!("MQTT Published packet: {:?}", publish);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("MQTT error: {:?}", e);
-                }
-            }
-
-            // if time is after 23:00 and we are not above armrest, set to night mode
-            let now = chrono::Local::now();
-            if now.hour() >= 23 || now.hour() < 6 {
-                let sven_state = mqtt_app_state.sven_state.lock().await;
-                if sven_state.height_mm < 795 && sven_state.height_mm > 0 {
-                    println!("Sven is not Above Armrest ({:?} mm < 795), activating night mode", sven_state.height_mm);
-                    drop(sven_state);
-                    set_to_night_mode(Extension(mqtt_app_state.clone())).await;
-                    // wait a bit before checking again to avoid spamming commands
-                    tokio::time::sleep(std::time::Duration::from_secs(15)).await
                 }
             }
         }
