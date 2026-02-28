@@ -168,7 +168,7 @@ async fn main() {
         loop {
             let sven_state = {
                 let sven_state = night_mode_app_state.sven_state.lock().await;
-                *sven_state
+                sven_state.clone()
             };
             static NIGHT_TIME_THRESHOLD_MM: u32 = 845;
 
