@@ -28,6 +28,7 @@ pub enum SvenCommand {
     DownRelative,   // value: mm
     AbsoluteHeight, // value: mm
     Position,       // value: SvenPosition
+    Calibrate,      // value: Calibrate
 }
 
 // Just for printing purposes
@@ -40,6 +41,7 @@ impl std::fmt::Display for SvenCommand {
             SvenCommand::DownRelative => write!(f, "Down Relative"),
             SvenCommand::AbsoluteHeight => write!(f, "Absolute Height"),
             SvenCommand::Position => write!(f, "Position"),
+            SvenCommand::Calibrate => write!(f, "Calibrate"),
         }
     }
 }
