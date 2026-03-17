@@ -18,6 +18,8 @@ pub const SVEN_COMMAND_TOPIC: &str = "sven/command";
 pub const SVEN_STATE_TOPIC: &str = "sven/state";
 pub const SVEN_STATUS_TOPIC: &str = "sven/status";
 
+static NIGHT_TIME_THRESHOLD_MM: u32 = 795;
+
 #[derive(Deserialize, Serialize, Debug)]
 pub enum SvenCommand {
     UpDuration,     // value: ms
@@ -117,7 +119,7 @@ async fn set_to_night_mode(Extension(app_state): Extension<Arc<AppState>>) {
             false,
             serde_json::to_string(&DeskCommand {
                 command: SvenCommand::AbsoluteHeight,
-                value: 850,
+                value: NIGHT_TIME_THRESHOLD_MM + 5,
             })
             .unwrap(),
         )
@@ -170,7 +172,6 @@ async fn main() {
                 let sven_state = night_mode_app_state.sven_state.lock().await;
                 sven_state.clone()
             };
-            static NIGHT_TIME_THRESHOLD_MM: u32 = 845;
 
             if sven_state.height_mm >= NIGHT_TIME_THRESHOLD_MM {
                 println!(
